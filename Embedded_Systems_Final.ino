@@ -1,3 +1,4 @@
+// test if we can push
 int finishCounter = 0;
 // Sensor pins (from RIGHT to LEFT: 8, 9, 10, 11)
 const int IR_RIGHT = 8;      // right sensor
