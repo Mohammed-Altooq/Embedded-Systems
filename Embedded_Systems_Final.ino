@@ -1,87 +1,64 @@
-// ================== Line Maze with BFS Return ==================
-// Uses 4 IR sensors and 2 motors (your pinout).
-// Phase 1: Explore maze using simple line-following + logging.
-// Phase 2: After detecting finish, run BFS to compute optimal path
-//          back to start, then execute that path.
+// ========== LINE FOLLOWER + LOGGING + BFS RETURN ==========
+// Assumptions:
+// - Maze is a line maze with junctions (no crazy loops).
+// - First run: follow the line from START to FINISH using your original logic.
+// - We log every 'L' and 'R' decision as we go.
+// - At FINISH: we build a chain graph, run BFS from FINISH node back to START,
+//   derive a sequence of return moves, then physically drive back to START,
+//   using the line follower plus the stored moves.
 //
-// NOTE: This is a simplified educational example.
-// - Cell transitions are time-based (delay) approximations.
-// - BFS is used on an abstract grid map built during exploration.
-// - Tune delays (CELL_FORWARD_TIME, TURN_TIME) for your robot.
-//
-// ===============================================================
+// Pins and low-level movement are the same as your original code.
+// ==========================================================
 
-// ----------------- Original Pin Definitions -----------------
 int finishCounter = 0;
 
 // Sensor pins (from RIGHT to LEFT: 8, 9, 10, 11)
-const int IR_RIGHT     = 8;   // right sensor
-const int IR_MID_RIGHT = 9;   // middle-right sensor
-const int IR_MID_LEFT  = 10;  // middle-left sensor
-const int IR_LEFT      = 11;  // left sensor
+const int IR_RIGHT      = 8;   // right sensor
+const int IR_MID_RIGHT  = 9;   // middle-right sensor
+const int IR_MID_LEFT   = 10;  // middle-left sensor (closer to left)
+const int IR_LEFT       = 11;  // left sensor
 
 // Motor pins
-const int motor1pin1 = 2;  // left motor IN1
-const int motor1pin2 = 3;  // left motor IN2
-const int motor2pin1 = 4;  // right motor IN1
-const int motor2pin2 = 5;  // right motor IN2
+const int motor1pin1 = 2;   // left motor IN1
+const int motor1pin2 = 3;   // left motor IN2
+const int motor2pin1 = 4;   // right motor IN1
+const int motor2pin2 = 5;   // right motor IN2
 
-// ----------------- Movement Timing (TUNE THESE) -----------------
-const int CELL_FORWARD_TIME = 400;  // ms: time to move approx one cell
-const int TURN_TIME         = 300;  // ms: time for ~90-degree turn
+// ===================== MODES =====================
 
-// ----------------- Maze / BFS Structures -----------------
-// Direction (absolute)
-enum Dir { NORTH = 0, EAST = 1, SOUTH = 2, WEST = 3 };
-
-// Mode of the robot
-enum Mode { EXPLORE, RETURN };
+enum Mode { EXPLORE, RETURN, DONE };
 Mode mode = EXPLORE;
 
-// Maze grid size (adjust if your maze is larger)
-const int ROWS = 5;
-const int COLS = 5;
+// ===================== PATH LOGGING =====================
 
-// Each cell: visited flag + walls in 4 directions
-struct Cell {
-  bool visited;
-  bool wall[4];  // wall[NORTH], wall[EAST], wall[SOUTH], wall[WEST]
-};
+// We will log each high-level junction decision during EXPLORE.
+// MAX_STEPS = max number of junction moves we expect.
+const int MAX_STEPS = 200;
+char forwardMoves[MAX_STEPS];   // moves taken from START -> FINISH ('L'/'R')
+int stepCount = 0;
 
-Cell maze[ROWS][COLS];
+// Return moves from FINISH back to START (computed via BFS on chain graph)
+char returnMoves[MAX_STEPS];
+int returnCount = 0;
+int returnIndex = 0;  // how many return commands we have already used
 
-// Robot logical position and heading in the grid
-int curR = ROWS - 1;  // start at bottom-left (you can change)
-int curC = 0;
-Dir curDir = NORTH;
+// ===================== BFS STRUCTURES =====================
+// We model the path as a chain of nodes 0..stepCount, where:
+//
+// Node 0      = START
+// Node i      = state after i-th decision
+// Node stepCount = FINISH
+//
+// Edges: (0-1), (1-2), ..., (stepCount-1, stepCount)
 
-int startR = curR;
-int startC = curC;
+const int MAX_NODES = MAX_STEPS + 1;
+int adj[MAX_NODES][2];   // each node in a chain has at most 2 neighbors
+int deg[MAX_NODES];
+bool visited[MAX_NODES];
+int parentNode[MAX_NODES];
 
-int goalR = -1;
-int goalC = -1;
+// ===================== MOVEMENT =====================
 
-// BFS data
-bool seen[ROWS][COLS];
-int parentCell[ROWS][COLS]; // parent as r*COLS + c
-
-struct QueueItem {
-  int r;
-  int c;
-};
-
-QueueItem q[ROWS * COLS];
-int qHead = 0, qTail = 0;
-
-// Commands for shortest path back: 'F','L','R','U'
-char pathCommands[ROWS * COLS * 2];
-int pathLen = 0;
-
-// To run return sequence once
-bool bfsDone = false;
-bool returnStarted = false;
-
-// ----------------- Motor Helper Functions -----------------
 void forwardMotors() {
   digitalWrite(motor1pin1, HIGH);
   digitalWrite(motor1pin2, LOW);
@@ -112,338 +89,159 @@ void stopMotors() {
   digitalWrite(motor2pin2, LOW);
 }
 
-// Move robot ~one cell forward (time-based)
-void moveOneCellForward() {
-  forwardMotors();
-  delay(CELL_FORWARD_TIME);
-  stopMotors();
-}
+// Your original semantic helpers
+void forward()  { forwardMotors(); }
+void left()     { leftMotors();    }
+void right()    { rightMotors();   }
 
-// Turn left ~90° and update direction
-void turnLeft90() {
-  leftMotors();
-  delay(TURN_TIME);
-  stopMotors();
-  curDir = (Dir)((curDir + 3) % 4); // rotate left
-}
-
-// Turn right ~90° and update direction
-void turnRight90() {
-  rightMotors();
-  delay(TURN_TIME);
-  stopMotors();
-  curDir = (Dir)((curDir + 1) % 4); // rotate right
-}
-
-// 180° turn
+// 180° turn at finish
 void turnAround() {
   rightMotors();
-  delay(2 * TURN_TIME);
+  delay(500);   // tune for ~180 degrees
   stopMotors();
-  curDir = (Dir)((curDir + 2) % 4);
 }
 
-// Update grid coordinates after moving one cell forward
-void updatePositionForward() {
-  if (curDir == NORTH)      curR--;
-  else if (curDir == SOUTH) curR++;
-  else if (curDir == EAST)  curC++;
-  else if (curDir == WEST)  curC--;
+// ===================== LOGGING =====================
 
-  // clamp to grid just in case
-  if (curR < 0) curR = 0;
-  if (curR >= ROWS) curR = ROWS - 1;
-  if (curC < 0) curC = 0;
-  if (curC >= COLS) curC = COLS - 1;
-}
-
-// Get opposite direction
-Dir oppositeDir(Dir d) {
-  return (Dir)((d + 2) % 4);
-}
-
-// ----------------- Sensor Reading -----------------
-void readSensors(int &R, int &MR, int &ML, int &L) {
-  R  = digitalRead(IR_RIGHT);
-  MR = digitalRead(IR_MID_RIGHT);
-  ML = digitalRead(IR_MID_LEFT);
-  L  = digitalRead(IR_LEFT);
-}
-
-// ----------------- Maze Logging During Exploration -----------------
-// Mark that from (curR,curC) we moved one cell in direction dAbs
-// Also open the corresponding wall in neighbor cell.
-void logMovement(Dir dAbs) {
-  // current cell open in direction dAbs
-  maze[curR][curC].wall[dAbs] = false;
-
-  // neighbor coordinates
-  int nr = curR;
-  int nc = curC;
-
-  if (dAbs == NORTH)      nr--;
-  else if (dAbs == SOUTH) nr++;
-  else if (dAbs == EAST)  nc++;
-  else if (dAbs == WEST)  nc--;
-
-  if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) {
-    return; // out of grid, ignore
-  }
-
-  // neighbor cell also open in opposite direction
-  Dir opp = oppositeDir(dAbs);
-  maze[nr][nc].wall[opp] = false;
-}
-
-// Decide next move in EXPLORE mode based on sensor pattern
-// Return: 'F' (forward), 'L' (left), 'R' (right), 'U' (U-turn)
-char decideNextMoveExplore() {
-  int R, MR, ML, L;
-  readSensors(R, MR, ML, L);
-  int M = (MR || ML);
-
-  // Debug print
-  Serial.print("R="); Serial.print(R);
-  Serial.print(" MR="); Serial.print(MR);
-  Serial.print(" ML="); Serial.print(ML);
-  Serial.print(" L="); Serial.println(L);
-
-  // Basic same logic as your original code:
-  if (M == 1) {
-    return 'F';
-  } else {
-    if (L == 1 && R == 0) {
-      return 'L';
-    } else if (R == 1 && L == 0) {
-      return 'R';
-    } else if (L == 1 && R == 1) {
-      // your rule: choose LEFT when both see
-      return 'L';
-    } else {
-      // nothing sees → search left (you can change to 'U' if needed)
-      return 'L';
-    }
+// Log junction decision during EXPLORE.
+void recordForwardMove(char m) {
+  if (stepCount < MAX_STEPS) {
+    forwardMoves[stepCount++] = m;
   }
 }
 
-// Execute a single navigation command and update maze map
-void executeExploreStep() {
-  char cmd = decideNextMoveExplore();
-
-  // Compute absolute move direction based on cmd and current direction
-  Dir moveDir = curDir;
-
-  if (cmd == 'L') {
-    // we will turn left then go forward
-    turnLeft90();
-    moveDir = curDir;
-    moveOneCellForward();
-  } else if (cmd == 'R') {
-    turnRight90();
-    moveDir = curDir;
-    moveOneCellForward();
-  } else if (cmd == 'U') {
-    turnAround();
-    moveDir = curDir;
-    moveOneCellForward();
-  } else { // 'F'
-    moveDir = curDir;
-    moveOneCellForward();
+// Build a simple chain graph 0..stepCount for BFS.
+void buildChainGraph() {
+  // Reset adjacency
+  for (int i = 0; i <= stepCount; i++) {
+    deg[i] = 0;
+    visited[i] = false;
+    parentNode[i] = -1;
+    adj[i][0] = adj[i][1] = -1;
   }
 
-  // Log that we moved from (curR,curC) in direction moveDir
-  logMovement(moveDir);
+  // Chain edges
+  for (int i = 0; i < stepCount; i++) {
+    int u = i;
+    int v = i + 1;
 
-  // Now update our position in the grid
-  updatePositionForward();
-
-  // Mark visited
-  maze[curR][curC].visited = true;
+    adj[u][deg[u]++] = v;
+    adj[v][deg[v]++] = u;
+  }
 }
 
-// ----------------- Finish Line Detection -----------------
-bool checkFinishLine() {
-  int R, MR, ML, L;
-  readSensors(R, MR, ML, L);
+// Run BFS on the chain from FINISH node back to START node.
+void runBFSAndBuildReturn() {
+  buildChainGraph();
 
-  // all sensors black?
-  if (L == 1 && ML == 1 && MR == 1 && R == 1) {
-    finishCounter++;
-  } else {
-    finishCounter = 0;
-  }
+  int start = stepCount;  // FINISH node
+  int goal  = 0;          // START node
 
-  // adjust threshold for how long finish must be seen
-  if (finishCounter > 10) { // ~1 sec if loop delay ~20-50ms
-    return true;
-  }
-  return false;
-}
+  // BFS queue
+  int q[MAX_NODES];
+  int head = 0, tail = 0;
 
-// ----------------- BFS and Path Construction -----------------
-// BFS from (startR,startC) to (goalR,goalC) on known maze
-void runBFS() {
-  Serial.println("Running BFS for shortest path back...");
-
-  // Init
-  for (int r = 0; r < ROWS; r++) {
-    for (int c = 0; c < COLS; c++) {
-      seen[r][c] = false;
-      parentCell[r][c] = -1;
-    }
-  }
-
-  qHead = 0;
-  qTail = 0;
-
-  // Enqueue start cell (goal → start OR start → goal; we want path goal->start for return)
-  // We'll do BFS from goal to start.
-  q[qTail++] = {goalR, goalC};
-  seen[goalR][goalC] = true;
+  visited[start] = true;
+  parentNode[start] = -1;
+  q[tail++] = start;
 
   bool found = false;
 
-  while (qHead < qTail) {
-    QueueItem cur = q[qHead++];
-    int r = cur.r;
-    int c = cur.c;
+  while (head < tail) {
+    int u = q[head++];
 
-    if (r == startR && c == startC) {
+    if (u == goal) {
       found = true;
       break;
     }
 
-    // Try 4 directions
-    for (int d = 0; d < 4; d++) {
-      if (maze[r][c].wall[d]) continue; // wall → no move
-
-      int nr = r;
-      int nc = c;
-
-      if (d == NORTH)      nr--;
-      else if (d == SOUTH) nr++;
-      else if (d == EAST)  nc++;
-      else if (d == WEST)  nc--;
-
-      if (nr < 0 || nr >= ROWS || nc < 0 || nc >= COLS) continue;
-      if (!maze[nr][nc].visited) continue;  // only use explored cells
-      if (seen[nr][nc]) continue;
-
-      seen[nr][nc] = true;
-      parentCell[nr][nc] = r * COLS + c;
-      q[qTail++] = {nr, nc};
+    for (int i = 0; i < deg[u]; i++) {
+      int v = adj[u][i];
+      if (v == -1) continue;
+      if (!visited[v]) {
+        visited[v] = true;
+        parentNode[v] = u;
+        q[tail++] = v;
+      }
     }
   }
 
   if (!found) {
-    Serial.println("No path found by BFS!");
-    pathLen = 0;
+    Serial.println("BFS: no path from FINISH to START (shouldn't happen in chain)");
+    returnCount = 0;
     return;
   }
 
-  // Reconstruct path (cells) from start back to goal
-  int cellPath[ROWS * COLS];
+  // Reconstruct node path from START back to FINISH
+  int nodePath[MAX_NODES];
   int len = 0;
-
-  int cr = startR;
-  int cc = startC;
-
-  while (!(cr == goalR && cc == goalC)) {
-    cellPath[len++] = cr * COLS + cc;
-    int p = parentCell[cr][cc];
-    if (p == -1) {
-      // Should not happen if found == true
-      break;
-    }
-    cr = p / COLS;
-    cc = p % COLS;
-  }
-  // include goal cell
-  cellPath[len++] = goalR * COLS + goalC;
-
-  // The cellPath is from start → goal (because we walked parents).
-  // But robot is currently at goal and wants to go to start,
-  // so we will traverse it backward to build movement commands.
-
-  // Starting direction for RETURN phase is current direction at goal:
-  Dir dCur = curDir;
-  pathLen = 0;
-
-  // Traverse: goal → ... → start
-  for (int i = len - 1; i > 0; i--) {
-    int cell1 = cellPath[i];     // current cell
-    int cell2 = cellPath[i - 1]; // next cell
-
-    int r1 = cell1 / COLS;
-    int c1 = cell1 % COLS;
-    int r2 = cell2 / COLS;
-    int c2 = cell2 % COLS;
-
-    Dir moveDir;
-
-    if (r2 == r1 - 1 && c2 == c1)      moveDir = NORTH;
-    else if (r2 == r1 + 1 && c2 == c1) moveDir = SOUTH;
-    else if (r2 == r1 && c2 == c1 + 1) moveDir = EAST;
-    else if (r2 == r1 && c2 == c1 - 1) moveDir = WEST;
-    else                               continue; // not adjacent, skip
-
-    // Convert from current heading dCur to moveDir => command
-    char cmd;
-    if (moveDir == dCur) {
-      cmd = 'F';
-    } else if (moveDir == (Dir)((dCur + 1) % 4)) {
-      cmd = 'R';
-    } else if (moveDir == (Dir)((dCur + 3) % 4)) {
-      cmd = 'L';
-    } else {
-      cmd = 'U'; // 180 turn
-      // after U-turn, heading changes by 180
-    }
-
-    pathCommands[pathLen++] = cmd;
-
-    // update heading after executing this turn (for next segment)
-    if (cmd == 'L') {
-      dCur = (Dir)((dCur + 3) % 4);
-    } else if (cmd == 'R') {
-      dCur = (Dir)((dCur + 1) % 4);
-    } else if (cmd == 'U') {
-      dCur = (Dir)((dCur + 2) % 4);
-    } // 'F' keeps heading
+  int cur = goal;
+  while (cur != -1) {
+    nodePath[len++] = cur;
+    cur = parentNode[cur];
   }
 
-  Serial.print("BFS path commands (goal->start): ");
-  for (int i = 0; i < pathLen; i++) {
-    Serial.print(pathCommands[i]);
-    Serial.print(' ');
+  // For debug: print path in terms of node indices
+  Serial.print("BFS nodes from START to FINISH: ");
+  for (int i = 0; i < len; i++) {
+    Serial.print(nodePath[i]);
+    if (i < len - 1) Serial.print(" -> ");
   }
   Serial.println();
 
-  bfsDone = true;
-}
+  // Now derive returnMoves from forwardMoves.
+  //
+  // forwardMoves[i] is the move taken between node i and i+1
+  // from START to FINISH. To go back, we walk the path from
+  // START to FINISH (nodePath), but interpret edges in reverse.
+  //
+  // On a line, BFS path is basically 0..stepCount, so return
+  // moves will be the forwardMoves reversed and with L<->R swapped.
 
-// Execute a single command in RETURN mode (no logging needed)
-void runReturnCommand(char cmd) {
-  if (cmd == 'L') {
-    turnLeft90();
-    moveOneCellForward();
-  } else if (cmd == 'R') {
-    turnRight90();
-    moveOneCellForward();
-  } else if (cmd == 'U') {
-    turnAround();
-    moveOneCellForward();
-  } else { // 'F'
-    moveOneCellForward();
+  returnCount = 0;
+
+  // 1) Extract the sequence of "edges" along the BFS path in forward direction.
+  char pathForwardMoves[MAX_STEPS];
+  int pathMoveCount = 0;
+
+  // For path nodes [n0, n1, n2, ..., nk], edges are between (n0,n1), (n1,n2), ...
+  for (int i = 0; i < len - 1; i++) {
+    int u = nodePath[i];
+    int v = nodePath[i + 1];
+
+    // Edges correspond to forwardMoves[index] where index = min(u,v)
+    int idx = (u < v) ? u : v;
+    if (idx >= 0 && idx < stepCount) {
+      pathForwardMoves[pathMoveCount++] = forwardMoves[idx];
+    }
   }
+
+  // 2) Reverse edges and swap L <-> R for return.
+  for (int i = pathMoveCount - 1; i >= 0; i--) {
+    char fm = pathForwardMoves[i];
+    char rm;
+    if (fm == 'L')      rm = 'R';
+    else if (fm == 'R') rm = 'L';
+    else                rm = 'F';   // just in case
+    returnMoves[returnCount++] = rm;
+  }
+
+  Serial.print("Return moves (FINISH -> START): ");
+  for (int i = 0; i < returnCount; i++) {
+    Serial.print(returnMoves[i]);
+    Serial.print(' ');
+  }
+  Serial.println();
+  returnIndex = 0;
 }
 
-// ----------------- Arduino Setup & Loop -----------------
+// ===================== SETUP =====================
+
 void setup() {
-  pinMode(IR_RIGHT,     INPUT);
+  pinMode(IR_RIGHT, INPUT);
   pinMode(IR_MID_RIGHT, INPUT);
-  pinMode(IR_MID_LEFT,  INPUT);
-  pinMode(IR_LEFT,      INPUT);
+  pinMode(IR_MID_LEFT, INPUT);
+  pinMode(IR_LEFT, INPUT);
 
   pinMode(motor1pin1, OUTPUT);
   pinMode(motor1pin2, OUTPUT);
@@ -451,63 +249,148 @@ void setup() {
   pinMode(motor2pin2, OUTPUT);
 
   Serial.begin(9600);
-  Serial.println("Maze solver with BFS return");
-
-  // Initialize maze
-  for (int r = 0; r < ROWS; r++) {
-    for (int c = 0; c < COLS; c++) {
-      maze[r][c].visited = false;
-      for (int d = 0; d < 4; d++) {
-        maze[r][c].wall[d] = true; // unknown = wall initially
-      }
-    }
-  }
-
-  maze[curR][curC].visited = true;
+  Serial.println("Line follower with BFS-based return");
 }
 
+// ===================== MAIN LOOP =====================
+
 void loop() {
+  int R   = digitalRead(IR_RIGHT);
+  int MR  = digitalRead(IR_MID_RIGHT);
+  int ML  = digitalRead(IR_MID_LEFT);
+  int L   = digitalRead(IR_LEFT);
+
+  int M = (MR || ML); // any middle sensor sees black
+
+  Serial.print("Mode=");
+  Serial.print(mode == EXPLORE ? "EXP" : (mode == RETURN ? "RET" : "DONE"));
+  Serial.print(" | R=");
+  Serial.print(R);
+  Serial.print(" MR=");
+  Serial.print(MR);
+  Serial.print(" ML=");
+  Serial.print(ML);
+  Serial.print(" L=");
+  Serial.println(L);
+
+  // ========== FINISH LINE DETECTION (BOTH MODES) ==========
+
+  if (L == 1 && ML == 1 && MR == 1 && R == 1) {
+    finishCounter++;      // all sensors black → count
+  } else {
+    finishCounter = 0;    // not all black → reset
+  }
+
+  if (mode == EXPLORE && finishCounter > 10) {
+    // We reached finish for the first time
+    stopMotors();
+    Serial.println("FINISH reached in EXPLORE mode.");
+
+    // Build BFS graph + compute return moves
+    runBFSAndBuildReturn();
+
+    // Turn around to face back towards START
+    turnAround();
+
+    // Switch to RETURN mode
+    mode = RETURN;
+    return;
+  }
+
+  // In RETURN, optionally stop if we detect START line pattern (if you have it)
+  // For now we will stop when we consume all returnMoves.
+
+  // ========== BEHAVIOUR BY MODE ==========
+
   if (mode == EXPLORE) {
-    // Check finish line first
-    if (checkFinishLine()) {
-      stopMotors();
-      Serial.println("Finish detected! Setting goal and running BFS...");
+    // ---------- ORIGINAL MAZE LOGIC (EXPLORATION) ----------
+    if (M == 1) {
+      // center sees the line → go straight
+      forward();
+      // We do NOT record forward moves here, only explicit L/R decisions.
+    } else {
+      // Center lost → use sides
 
-      goalR = curR;
-      goalC = curC;
-
-      // Run BFS to compute optimal path back to start
-      runBFS();
-
-      // Now switch to RETURN mode (robot is already at goal)
-      mode = RETURN;
-      return;
-    }
-
-    // Normal exploration step
-    executeExploreStep();
-
-    delay(50); // small delay to avoid spamming
-  }
-  else if (mode == RETURN) {
-    if (!bfsDone) {
-      // Safety: if BFS somehow not done, just stop
-      stopMotors();
-      while (true);
-    }
-
-    // Execute the shortest path commands ONCE
-    if (!returnStarted) {
-      Serial.println("Starting RETURN along BFS path...");
-      returnStarted = true;
-
-      for (int i = 0; i < pathLen; i++) {
-        runReturnCommand(pathCommands[i]);
+      if (L == 1 && R == 0) {
+        left();
+        recordForwardMove('L');
+      } else if (R == 1 && L == 0) {
+        right();
+        recordForwardMove('R');
+      } else if (L == 1 && R == 1) {
+        left();    // your rule: choose LEFT when both see
+        recordForwardMove('L');
+      } else {
+        // nothing sees → search left
+        left();
+        // this is "search/correction", we won't log it as a graph decision
       }
-
-      stopMotors();
-      Serial.println("RETURN complete. Stopping forever.");
-      while (true); // freeze at start
     }
+
+  } else if (mode == RETURN) {
+    // ---------- RETURN USING RECORDED MOVES + LINE FOLLOWER ----------
+
+    if (returnIndex >= returnCount) {
+      // We've applied all return moves → we should be back at START.
+      stopMotors();
+      Serial.println("RETURN complete. Assuming we are back at START. DONE.");
+      mode = DONE;
+      while (true);  // freeze
+    }
+
+    // Basic line-following to stay on the path,
+    // but at "decision points" we force the choice based on returnMoves[].
+
+    char cmd = returnMoves[returnIndex];
+
+    // We treat "junction-ish" situations as moments to apply cmd.
+    bool junctionLike = (M == 0 && (L == 1 || R == 1)) || (M == 1 && (L == 1 || R == 1));
+
+    if (junctionLike) {
+      // We are likely at/near a junction → apply next command.
+      if (cmd == 'L') {
+        left();
+        Serial.println("RETURN: taking LEFT at junction");
+      } else if (cmd == 'R') {
+        right();
+        Serial.println("RETURN: taking RIGHT at junction");
+      } else {
+        // 'F' or unknown → prefer straight
+        if (M == 1) {
+          forward();
+          Serial.println("RETURN: going FORWARD at junction");
+        } else if (L == 1) {
+          left();
+        } else if (R == 1) {
+          right();
+        } else {
+          // lost → light correction
+          left();
+        }
+      }
+      returnIndex++;   // we used this return command
+    } else {
+      // Not a junction → use normal follower logic to stay on line.
+      if (M == 1) {
+        forward();
+      } else {
+        if (L == 1 && R == 0) {
+          left();
+        } else if (R == 1 && L == 0) {
+          right();
+        } else if (L == 1 && R == 1) {
+          // ambiguous, keep some left bias
+          left();
+        } else {
+          left(); // search
+        }
+      }
+    }
+
+  } else {
+    // DONE mode
+    stopMotors();
   }
+
+  delay(20);
 }
