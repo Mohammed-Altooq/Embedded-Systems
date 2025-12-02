@@ -1,14 +1,11 @@
-// ========== LINE FOLLOWER + LOGGING + BFS RETURN ==========
-// Assumptions:
-// - Maze is a line maze with junctions (no crazy loops).
-// - First run: follow the line from START to FINISH using your original logic.
-// - We log every 'L' and 'R' decision as we go.
-// - At FINISH: we build a chain graph, run BFS from FINISH node back to START,
-//   derive a sequence of return moves, then physically drive back to START,
-//   using the line follower plus the stored moves.
-//
-// Pins and low-level movement are the same as your original code.
-// ==========================================================
+// ========== LINE FOLLOWER + LIGHTWEIGHT BFS RETURN ==========
+// Memory-optimized for Arduino Uno (2KB SRAM).
+// - EXPLORE: same line-following logic as your original code.
+// - Log L/R junction decisions into forwardMoves[].
+// - At FINISH: run a tiny BFS on an implicit chain 0..stepCount,
+//   compute returnMoves[] (FINISH -> START), turn around,
+//   then RETURN using those moves while still following the line.
+// ============================================================
 
 int finishCounter = 0;
 
@@ -31,31 +28,28 @@ Mode mode = EXPLORE;
 
 // ===================== PATH LOGGING =====================
 
-// We will log each high-level junction decision during EXPLORE.
-// MAX_STEPS = max number of junction moves we expect.
-const int MAX_STEPS = 200;
-char forwardMoves[MAX_STEPS];   // moves taken from START -> FINISH ('L'/'R')
+// Limit on number of junction decisions we log.
+// Keep this modest to save RAM. Increase only if needed.
+const int MAX_STEPS = 60;
+
+char forwardMoves[MAX_STEPS];   // moves from START -> FINISH ('L'/'R')
 int stepCount = 0;
 
-// Return moves from FINISH back to START (computed via BFS on chain graph)
-char returnMoves[MAX_STEPS];
+char returnMoves[MAX_STEPS];    // moves from FINISH -> START
 int returnCount = 0;
-int returnIndex = 0;  // how many return commands we have already used
+int returnIndex = 0;
 
 // ===================== BFS STRUCTURES =====================
-// We model the path as a chain of nodes 0..stepCount, where:
-//
-// Node 0      = START
-// Node i      = state after i-th decision
-// Node stepCount = FINISH
-//
-// Edges: (0-1), (1-2), ..., (stepCount-1, stepCount)
 
+// Nodes are 0..stepCount (chain).
 const int MAX_NODES = MAX_STEPS + 1;
-int adj[MAX_NODES][2];   // each node in a chain has at most 2 neighbors
-int deg[MAX_NODES];
+
 bool visited[MAX_NODES];
 int parentNode[MAX_NODES];
+
+// Simple queue and path buffer
+int q[MAX_NODES];
+int nodePath[MAX_NODES];
 
 // ===================== MOVEMENT =====================
 
@@ -89,56 +83,50 @@ void stopMotors() {
   digitalWrite(motor2pin2, LOW);
 }
 
-// Your original semantic helpers
+// Semantic helpers like your original
 void forward()  { forwardMotors(); }
 void left()     { leftMotors();    }
 void right()    { rightMotors();   }
 
-// 180° turn at finish
+// 180° turn at finish (tune delay for your robot)
 void turnAround() {
   rightMotors();
-  delay(500);   // tune for ~180 degrees
+  delay(500);   // adjust for ~180 degrees
   stopMotors();
 }
 
 // ===================== LOGGING =====================
 
-// Log junction decision during EXPLORE.
 void recordForwardMove(char m) {
   if (stepCount < MAX_STEPS) {
     forwardMoves[stepCount++] = m;
   }
 }
 
-// Build a simple chain graph 0..stepCount for BFS.
-void buildChainGraph() {
-  // Reset adjacency
-  for (int i = 0; i <= stepCount; i++) {
-    deg[i] = 0;
+// ===================== BFS ON IMPLICIT CHAIN =====================
+// Nodes are 0..stepCount.
+// Neighbors of u are: u-1 (if >=0) and u+1 (if <=stepCount).
+// We BFS from FINISH node (stepCount) to START node (0).
+
+void runBFSAndBuildReturn() {
+  int N = stepCount + 1;   // number of nodes
+
+  if (N < 2) {
+    // No real moves made
+    returnCount = 0;
+    returnIndex = 0;
+    return;
+  }
+
+  // Init BFS arrays
+  for (int i = 0; i < N; i++) {
     visited[i] = false;
     parentNode[i] = -1;
-    adj[i][0] = adj[i][1] = -1;
   }
-
-  // Chain edges
-  for (int i = 0; i < stepCount; i++) {
-    int u = i;
-    int v = i + 1;
-
-    adj[u][deg[u]++] = v;
-    adj[v][deg[v]++] = u;
-  }
-}
-
-// Run BFS on the chain from FINISH node back to START node.
-void runBFSAndBuildReturn() {
-  buildChainGraph();
 
   int start = stepCount;  // FINISH node
   int goal  = 0;          // START node
 
-  // BFS queue
-  int q[MAX_NODES];
   int head = 0, tail = 0;
 
   visited[start] = true;
@@ -155,83 +143,79 @@ void runBFSAndBuildReturn() {
       break;
     }
 
-    for (int i = 0; i < deg[u]; i++) {
-      int v = adj[u][i];
-      if (v == -1) continue;
-      if (!visited[v]) {
-        visited[v] = true;
-        parentNode[v] = u;
-        q[tail++] = v;
-      }
+    // Neighbor 1: u - 1
+    if (u - 1 >= 0 && !visited[u - 1]) {
+      visited[u - 1] = true;
+      parentNode[u - 1] = u;
+      q[tail++] = u - 1;
+    }
+
+    // Neighbor 2: u + 1
+    if (u + 1 < N && !visited[u + 1]) {
+      visited[u + 1] = true;
+      parentNode[u + 1] = u;
+      q[tail++] = u + 1;
     }
   }
 
   if (!found) {
-    Serial.println("BFS: no path from FINISH to START (shouldn't happen in chain)");
+    Serial.println("BFS: no path from FINISH to START (unexpected for chain).");
     returnCount = 0;
+    returnIndex = 0;
     return;
   }
 
   // Reconstruct node path from START back to FINISH
-  int nodePath[MAX_NODES];
   int len = 0;
   int cur = goal;
-  while (cur != -1) {
+  while (cur != -1 && len < N) {
     nodePath[len++] = cur;
     cur = parentNode[cur];
   }
 
-  // For debug: print path in terms of node indices
-  Serial.print("BFS nodes from START to FINISH: ");
+  // Debug: print node path
+  Serial.print("BFS nodes (START->FINISH): ");
   for (int i = 0; i < len; i++) {
     Serial.print(nodePath[i]);
     if (i < len - 1) Serial.print(" -> ");
   }
   Serial.println();
 
-  // Now derive returnMoves from forwardMoves.
-  //
-  // forwardMoves[i] is the move taken between node i and i+1
-  // from START to FINISH. To go back, we walk the path from
-  // START to FINISH (nodePath), but interpret edges in reverse.
-  //
-  // On a line, BFS path is basically 0..stepCount, so return
-  // moves will be the forwardMoves reversed and with L<->R swapped.
-
-  returnCount = 0;
-
-  // 1) Extract the sequence of "edges" along the BFS path in forward direction.
+  // Build forward path moves along this node sequence.
+  // Edge between nodePath[i] and nodePath[i+1] corresponds to
+  // forwardMoves[min(u,v)] (for chain).
   char pathForwardMoves[MAX_STEPS];
   int pathMoveCount = 0;
 
-  // For path nodes [n0, n1, n2, ..., nk], edges are between (n0,n1), (n1,n2), ...
-  for (int i = 0; i < len - 1; i++) {
+  for (int i = 0; i < len - 1 && pathMoveCount < MAX_STEPS; i++) {
     int u = nodePath[i];
     int v = nodePath[i + 1];
+    int idx = (u < v) ? u : v;   // edge index in forwardMoves
 
-    // Edges correspond to forwardMoves[index] where index = min(u,v)
-    int idx = (u < v) ? u : v;
     if (idx >= 0 && idx < stepCount) {
       pathForwardMoves[pathMoveCount++] = forwardMoves[idx];
     }
   }
 
-  // 2) Reverse edges and swap L <-> R for return.
-  for (int i = pathMoveCount - 1; i >= 0; i--) {
+  // Now derive returnMoves by reversing pathForwardMoves and swapping L <-> R
+  returnCount = 0;
+
+  for (int i = pathMoveCount - 1; i >= 0 && returnCount < MAX_STEPS; i--) {
     char fm = pathForwardMoves[i];
     char rm;
     if (fm == 'L')      rm = 'R';
     else if (fm == 'R') rm = 'L';
-    else                rm = 'F';   // just in case
+    else                rm = 'F';
     returnMoves[returnCount++] = rm;
   }
 
-  Serial.print("Return moves (FINISH -> START): ");
+  Serial.print("Return moves (FINISH->START): ");
   for (int i = 0; i < returnCount; i++) {
     Serial.print(returnMoves[i]);
     Serial.print(' ');
   }
   Serial.println();
+
   returnIndex = 0;
 }
 
@@ -249,7 +233,7 @@ void setup() {
   pinMode(motor2pin2, OUTPUT);
 
   Serial.begin(9600);
-  Serial.println("Line follower with BFS-based return");
+  Serial.println("Line follower with lightweight BFS return");
 }
 
 // ===================== MAIN LOOP =====================
@@ -262,6 +246,7 @@ void loop() {
 
   int M = (MR || ML); // any middle sensor sees black
 
+  // Debug (you can comment these out to save a bit more time/serial spam)
   Serial.print("Mode=");
   Serial.print(mode == EXPLORE ? "EXP" : (mode == RETURN ? "RET" : "DONE"));
   Serial.print(" | R=");
@@ -273,8 +258,7 @@ void loop() {
   Serial.print(" L=");
   Serial.println(L);
 
-  // ========== FINISH LINE DETECTION (BOTH MODES) ==========
-
+  // ---------- FINISH LINE DETECTION ----------
   if (L == 1 && ML == 1 && MR == 1 && R == 1) {
     finishCounter++;      // all sensors black → count
   } else {
@@ -282,14 +266,14 @@ void loop() {
   }
 
   if (mode == EXPLORE && finishCounter > 10) {
-    // We reached finish for the first time
+    // Reached FINISH in exploration
     stopMotors();
     Serial.println("FINISH reached in EXPLORE mode.");
 
-    // Build BFS graph + compute return moves
+    // Compute BFS-based return path
     runBFSAndBuildReturn();
 
-    // Turn around to face back towards START
+    // Turn around to face back toward START
     turnAround();
 
     // Switch to RETURN mode
@@ -297,17 +281,12 @@ void loop() {
     return;
   }
 
-  // In RETURN, optionally stop if we detect START line pattern (if you have it)
-  // For now we will stop when we consume all returnMoves.
-
-  // ========== BEHAVIOUR BY MODE ==========
-
   if (mode == EXPLORE) {
     // ---------- ORIGINAL MAZE LOGIC (EXPLORATION) ----------
     if (M == 1) {
       // center sees the line → go straight
       forward();
-      // We do NOT record forward moves here, only explicit L/R decisions.
+      // We do NOT log forward; only explicit L/R choices.
     } else {
       // Center lost → use sides
 
@@ -323,54 +302,46 @@ void loop() {
       } else {
         // nothing sees → search left
         left();
-        // this is "search/correction", we won't log it as a graph decision
+        // not logged as a graph decision
       }
     }
 
   } else if (mode == RETURN) {
-    // ---------- RETURN USING RECORDED MOVES + LINE FOLLOWER ----------
-
     if (returnIndex >= returnCount) {
-      // We've applied all return moves → we should be back at START.
+      // We used all return moves → assume we are back at START.
       stopMotors();
-      Serial.println("RETURN complete. Assuming we are back at START. DONE.");
+      Serial.println("RETURN complete. Back at START (assumed). DONE.");
       mode = DONE;
-      while (true);  // freeze
+      while (true); // freeze
     }
-
-    // Basic line-following to stay on the path,
-    // but at "decision points" we force the choice based on returnMoves[].
 
     char cmd = returnMoves[returnIndex];
 
-    // We treat "junction-ish" situations as moments to apply cmd.
     bool junctionLike = (M == 0 && (L == 1 || R == 1)) || (M == 1 && (L == 1 || R == 1));
 
     if (junctionLike) {
-      // We are likely at/near a junction → apply next command.
+      // Apply planned return decision at junction
       if (cmd == 'L') {
         left();
-        Serial.println("RETURN: taking LEFT at junction");
+        Serial.println("RETURN: LEFT at junction");
       } else if (cmd == 'R') {
         right();
-        Serial.println("RETURN: taking RIGHT at junction");
-      } else {
-        // 'F' or unknown → prefer straight
+        Serial.println("RETURN: RIGHT at junction");
+      } else { // 'F' or unknown
         if (M == 1) {
           forward();
-          Serial.println("RETURN: going FORWARD at junction");
+          Serial.println("RETURN: FORWARD at junction");
         } else if (L == 1) {
           left();
         } else if (R == 1) {
           right();
         } else {
-          // lost → light correction
           left();
         }
       }
-      returnIndex++;   // we used this return command
+      returnIndex++;
     } else {
-      // Not a junction → use normal follower logic to stay on line.
+      // Not a junction: just stay on the line using same logic
       if (M == 1) {
         forward();
       } else {
@@ -379,16 +350,15 @@ void loop() {
         } else if (R == 1 && L == 0) {
           right();
         } else if (L == 1 && R == 1) {
-          // ambiguous, keep some left bias
           left();
         } else {
-          left(); // search
+          left();
         }
       }
     }
 
   } else {
-    // DONE mode
+    // DONE
     stopMotors();
   }
 
