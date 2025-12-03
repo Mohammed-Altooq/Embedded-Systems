@@ -1,9 +1,9 @@
 int finishCounter = 0;
 // Sensor pins (from RIGHT to LEFT: 8, 9, 10, 11)
-const int IR_RIGHT = 8;      // right sensor
-const int IR_MID_RIGHT = 9;  // middle-right sensor
-const int IR_MID_LEFT = 10;  // middle-left sensor (closer to left)
-const int IR_LEFT = 11;      // left sensor
+const int IR_RIGHT = 11;      // right sensor
+const int IR_MID_RIGHT = 10;  // middle-right sensor
+const int IR_MID_LEFT = 9;  // middle-left sensor (closer to left)
+const int IR_LEFT = 8;      // left sensor
 
 // Motor pins
 const int motor1pin1 = 2;  // left motor IN1
@@ -33,16 +33,16 @@ void forward() {
   digitalWrite(motor2pin2, HIGH);
 }
 
-void right() {
-  // turn right
+void left() {
+  // turn left
   digitalWrite(motor1pin1, LOW);
   digitalWrite(motor1pin2, HIGH);
   digitalWrite(motor2pin1, HIGH);
   digitalWrite(motor2pin2, LOW);
 }
 
-void left() {
-  // turn left
+void right() {
+  // turn right
   digitalWrite(motor1pin1, HIGH);
   digitalWrite(motor1pin2, LOW);
   digitalWrite(motor2pin1, LOW);
@@ -104,7 +104,7 @@ void loop() {
       left();  // your rule: choose LEFT when both see
     } else {
       // nothing sees → search left
-      left();
+      
     }
   }
 
