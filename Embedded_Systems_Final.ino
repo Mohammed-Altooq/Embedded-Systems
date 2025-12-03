@@ -84,8 +84,10 @@ void loop() {
   // delay = 20 ms → 1000ms / 20ms = 50 loops ≈ 1 second
   if (finishCounter > 10) {
     stopMotors();
-    while (true)
-      ;  // freeze robot forever at finish
+    while (true){
+      
+    }
+    // freeze robot forever at finish
   }
 
   // ---------- NORMAL MAZE LOGIC ----------
@@ -103,8 +105,7 @@ void loop() {
     } else if (L == 1 && R == 1) {
       left();  // your rule: choose LEFT when both see
     } else {
-      // nothing sees → search left
-      
+      stopMotors();
     }
   }
 
