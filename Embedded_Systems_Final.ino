@@ -1,6 +1,6 @@
 int finishCounter = 0;
 int allWhiteCounter = 0;   // debounce for dead-end / lost detection
- 
+int deadEndCounter = 0;
 // Sensor pins (RIGHT → LEFT)
 const int IR_RIGHT      = 11;
 const int IR_MID_RIGHT  = 10;
@@ -41,6 +41,9 @@ void left() {
   digitalWrite(motor1pin2, HIGH);
   digitalWrite(motor2pin1, HIGH);
   digitalWrite(motor2pin2, LOW);
+  if(deadEndCounter > 0){
+    deadEndCounter--;
+  }
 }
  
 void right() {
@@ -48,6 +51,9 @@ void right() {
   digitalWrite(motor1pin2, LOW);
   digitalWrite(motor2pin1, LOW);
   digitalWrite(motor2pin2, HIGH);
+  if(deadEndCounter > 0){
+    deadEndCounter--;
+  }
 }
  
 void backward() {
@@ -55,6 +61,7 @@ void backward() {
   digitalWrite(motor1pin2, LOW);
   digitalWrite(motor2pin1, HIGH);
   digitalWrite(motor2pin2, LOW);
+  deadEndCounter++;
 }
  
 void stopMotors() {
@@ -67,6 +74,7 @@ void stopMotors() {
 // Turn around in place until middle sees line again
 void turnAround() {
   Serial.println("U-turn");
+  deadEndCounter = 0;
   while (true) {
     int R  = digitalRead(IR_RIGHT);
     int MR = digitalRead(IR_MID_RIGHT);
@@ -96,7 +104,7 @@ void handleDeadEnd() {
  
   // 1) Small bump backward
   backward();
-  delay(150);
+  delay(100);
   stopMotors();
   delay(50);
  
@@ -106,15 +114,16 @@ void handleDeadEnd() {
   int ML = digitalRead(IR_MID_LEFT);
   int L  = digitalRead(IR_LEFT);
  
+  if(deadEndCounter > 3){
+    deadEndCounter = 0;
+    turnAround();
+  }
+
   // If we found the line again after backing up → done
   if (L == 1 || ML == 1 || MR == 1 || R == 1) {
     Serial.println("Line found again after backing up");
     return;
   }
- 
-  // 3) Still all white → assume true dead end → U-turn
-  Serial.println("Still white: true dead end, turning around");
-  turnAround();
 }
  
 void loop() {
