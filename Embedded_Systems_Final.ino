@@ -1,33 +1,19 @@
 int finishCounter = 0;
-int allWhiteCounter = 0;   // debounce for dead-end / lost detection
-int deadEndCounter = 0;
+int allWhiteCounter = 0;
+ 
 // Sensor pins (RIGHT → LEFT)
 const int IR_RIGHT      = 11;
 const int IR_MID_RIGHT  = 10;
 const int IR_MID_LEFT   = 9;
 const int IR_LEFT       = 8;
  
-// Motor pins
+// Motor pins (L298N)
 const int motor1pin1 = 2;  
 const int motor1pin2 = 3;  
 const int motor2pin1 = 4;  
 const int motor2pin2 = 5;
  
-void setup() {
-  pinMode(IR_RIGHT, INPUT);
-  pinMode(IR_MID_RIGHT, INPUT);
-  pinMode(IR_MID_LEFT, INPUT);
-  pinMode(IR_LEFT, INPUT);
- 
-  pinMode(motor1pin1, OUTPUT);
-  pinMode(motor1pin2, OUTPUT);
-  pinMode(motor2pin1, OUTPUT);
-  pinMode(motor2pin2, OUTPUT);
- 
-  Serial.begin(9600);
-  Serial.println("Left-hand maze solver with dead-end handling");
-  delay(1000);
-}
+// ------------------ MOTOR FUNCTIONS ------------------
  
 void forward() {
   digitalWrite(motor1pin1, LOW);
@@ -41,9 +27,6 @@ void left() {
   digitalWrite(motor1pin2, HIGH);
   digitalWrite(motor2pin1, HIGH);
   digitalWrite(motor2pin2, LOW);
-  if(deadEndCounter > 0){
-    deadEndCounter--;
-  }
 }
  
 void right() {
@@ -51,17 +34,6 @@ void right() {
   digitalWrite(motor1pin2, LOW);
   digitalWrite(motor2pin1, LOW);
   digitalWrite(motor2pin2, HIGH);
-  if(deadEndCounter > 0){
-    deadEndCounter--;
-  }
-}
- 
-void backward() {
-  digitalWrite(motor1pin1, HIGH);
-  digitalWrite(motor1pin2, LOW);
-  digitalWrite(motor2pin1, HIGH);
-  digitalWrite(motor2pin2, LOW);
-  deadEndCounter++;
 }
  
 void stopMotors() {
@@ -71,60 +43,44 @@ void stopMotors() {
   digitalWrite(motor2pin2, LOW);
 }
  
-// Turn around in place until middle sees line again
+// ------------------ U-TURN (LEFT ROTATION) ------------------
+ 
 void turnAround() {
-  Serial.println("U-turn");
-  deadEndCounter = 0;
   while (true) {
-    int R  = digitalRead(IR_RIGHT);
     int MR = digitalRead(IR_MID_RIGHT);
     int ML = digitalRead(IR_MID_LEFT);
-    int L  = digitalRead(IR_LEFT);
  
-    // if middle sensors see black, stop turning
     if (MR == 1 || ML == 1) {
+      stopMotors();
+      delay(50);
+      forward();
+      delay(80);
       stopMotors();
       break;
     }
- 
-    // rotate on spot to the left
-    digitalWrite(motor1pin1, LOW);
-    digitalWrite(motor1pin2, HIGH);
-    digitalWrite(motor2pin1, HIGH);
-    digitalWrite(motor2pin2, LOW);
+    left();
     delay(25);
-    stopMotors();
-    delay(5);
   }
 }
  
-// Dead-end / "really lost" handler
-void handleDeadEnd() {
-  Serial.println("Dead-end / lost: trying to recover");
+// ------------------ SETUP ------------------
  
-  // 1) Small bump backward
-  backward();
-  delay(100);
-  stopMotors();
-  delay(50);
+void setup() {
+  pinMode(IR_RIGHT, INPUT);
+  pinMode(IR_MID_RIGHT, INPUT);
+  pinMode(IR_MID_LEFT, INPUT);
+  pinMode(IR_LEFT, INPUT);
  
-  // 2) Check sensors again
-  int R  = digitalRead(IR_RIGHT);
-  int MR = digitalRead(IR_MID_RIGHT);
-  int ML = digitalRead(IR_MID_LEFT);
-  int L  = digitalRead(IR_LEFT);
+  pinMode(motor1pin1, OUTPUT);
+  pinMode(motor1pin2, OUTPUT);
+  pinMode(motor2pin1, OUTPUT);
+  pinMode(motor2pin2, OUTPUT);
  
-  if(deadEndCounter > 3){
-    deadEndCounter = 0;
-    turnAround();
-  }
-
-  // If we found the line again after backing up → done
-  if (L == 1 || ML == 1 || MR == 1 || R == 1) {
-    Serial.println("Line found again after backing up");
-    return;
-  }
+  Serial.begin(9600);
+  delay(500);
 }
+ 
+// ------------------ MAIN LOOP ------------------
  
 void loop() {
   int R  = digitalRead(IR_RIGHT);
@@ -132,71 +88,99 @@ void loop() {
   int ML = digitalRead(IR_MID_LEFT);
   int L  = digitalRead(IR_LEFT);
  
-  int M  = MR || ML;  // any middle sensor sees black
+  int M  = MR || ML;  // middle sees line?
  
-  // ---------- FINISH LINE DETECTION ----------
-  if (L == 1 && ML == 1 && MR == 1 && R == 1) {
-    finishCounter++;
-  } else {
-    finishCounter = 0;
-  }
+  // ---------- FINISH LINE (ALL BLACK) ----------
+  if (L == 1 && ML == 1 && MR == 1 && R == 1) finishCounter++;
+  else finishCounter = 0;
  
   if (finishCounter > 10) {
     stopMotors();
-    Serial.println("Finish line reached, stopping.");
     while (true) {}
   }
  
-  // ---------- ALL-WHITE DEBOUNCE (possible dead-end / lost) ----------
+  // ---------- POSSIBLE DEAD-END (ALL WHITE) ----------
   if (L == 0 && ML == 0 && MR == 0 && R == 0) {
     allWhiteCounter++;
   } else {
     allWhiteCounter = 0;
   }
  
-  // Only handle dead-end if it's been white for a while (avoid glitches)
-  if (allWhiteCounter > 5) {      // ~100ms of solid white
+  if (allWhiteCounter > 5) {
     allWhiteCounter = 0;
-    handleDeadEnd();
-    delay(20);
-    return;
-  }
  
-  // ---------- LEFT-HAND EXPLORATION LOGIC (hug left but still walk straight) ----------
+    // ------------------ PEEK RIGHT CHECK ------------------
+    stopMotors();
+    delay(30);
+    right();        // peek a little to check for a hidden right branch
+    delay(120);     // L298N small angle (tune 80–130 ms)
+    stopMotors();
+    delay(30);
  
-  // 1) LEFT-HAND RULE:
-  // If there is a left branch while still on main line -> turn left
-  // "Left branch" = left sensor + at least one middle sensor on black
-  if (L == 1 && (ML == 1 || MR == 1)) {
-    Serial.println("LEFT BRANCH → turn left (left-hand rule)");
+    int R2  = digitalRead(IR_RIGHT);
+    int MR2 = digitalRead(IR_MID_RIGHT);
+    int ML2 = digitalRead(IR_MID_LEFT);
+ 
+    // If right found -> commit full right turn
+    if (R2 == 1 || MR2 == 1 || ML2 == 1) {
+      right();
+      delay(250);   // Full 90° turn on L298N (tune 200–300 ms)
+      stopMotors();
+      return;
+    }
+ 
+    // If no right turn, return to center position
     left();
-    delay(80);   // commit into the turn a bit
+    delay(100);
+    stopMotors();
+    delay(20);
+ 
+    // ------------------ FORWARD REVEAL TEST ------------------
+    forward();      // small forward to reveal corners / overshoot fix
+    delay(70);
+    stopMotors();
+    delay(20);
+ 
+    // Read again
+    R  = digitalRead(IR_RIGHT);
+    MR = digitalRead(IR_MID_RIGHT);
+    ML = digitalRead(IR_MID_LEFT);
+    L  = digitalRead(IR_LEFT);
+ 
+    // If line appeared -> continue
+    if (R || MR || ML || L) return;
+ 
+    // Real dead-end -> U-turn
+    turnAround();
     return;
   }
  
-  // 2) Otherwise, go STRAIGHT if middle sees line
+  // ---------- NORMAL LEFT-HAND RULE (YOUR ORIGINAL PRIORITY) ----------
+ 
+  // 1) Prefer LEFT TURN
+  if (L == 1 && (ML == 1 || MR == 1)) {
+    left();
+    delay(70);
+    return;
+  }
+ 
+  // 2) If straight available, take it
   if (M == 1) {
     forward();
     return;
   }
  
-  // 3) If no left & no straight, but right + middle sees a branch → turn right
+  // 3) If no straight, take RIGHT
   if (R == 1 && (ML == 1 || MR == 1)) {
-    Serial.println("RIGHT BRANCH → turn right");
     right();
-    delay(80);
+    delay(70);
     return;
   }
  
-  // 4) Small corrections when only one side sees the line
-  if (L == 1 && R == 0) {
-    left();
-  } else if (R == 1 && L == 0) {
-    right();
-  } else {
-    // Probably near lost, but not fully white yet → stop briefly
-    stopMotors();
-  }
+  // 4) Small corrections if drifting
+  if (L == 1) left();
+  else if (R == 1) right();
+  else stopMotors();
  
   delay(20);
 }
