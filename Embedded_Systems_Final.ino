@@ -1,4 +1,4 @@
-int finishCounter = 0;
+// ===================== GLOBAL VARIABLES =====================
 int allWhiteCounter = 0;
  
 // Sensor pins (RIGHT → LEFT)
@@ -13,8 +13,8 @@ const int motor1pin2 = 3;
 const int motor2pin1 = 4;  
 const int motor2pin2 = 5;
  
-// ------------------ MOTOR FUNCTIONS ------------------
  
+// ===================== MOTOR FUNCTIONS =====================
 void forward() {
   digitalWrite(motor1pin1, LOW);
   digitalWrite(motor1pin2, HIGH);
@@ -43,8 +43,8 @@ void stopMotors() {
   digitalWrite(motor2pin2, LOW);
 }
  
-// ------------------ U-TURN (LEFT ROTATION) ------------------
  
+// ===================== U-TURN =====================
 void turnAround() {
   while (true) {
     int MR = digitalRead(IR_MID_RIGHT);
@@ -63,8 +63,8 @@ void turnAround() {
   }
 }
  
-// ------------------ SETUP ------------------
  
+// ===================== SETUP =====================
 void setup() {
   pinMode(IR_RIGHT, INPUT);
   pinMode(IR_MID_RIGHT, INPUT);
@@ -80,8 +80,8 @@ void setup() {
   delay(500);
 }
  
-// ------------------ MAIN LOOP ------------------
  
+// ===================== MAIN LOOP =====================
 void loop() {
   int R  = digitalRead(IR_RIGHT);
   int MR = digitalRead(IR_MID_RIGHT);
@@ -90,16 +90,39 @@ void loop() {
  
   int M  = MR || ML;  // middle sees line?
  
-  // ---------- FINISH LINE (ALL BLACK) ----------
-  if (L == 1 && ML == 1 && MR == 1 && R == 1) finishCounter++;
-  else finishCounter = 0;
  
-  if (finishCounter > 10) {
+  // ---------- VALIDATED FINISH CHECK ----------
+  if (L == 1 && ML == 1 && MR == 1 && R == 1) {
+    // Pause & stabilize
     stopMotors();
-    while (true) {}
+    delay(40);
+ 
+    // Move ahead a little to test if black continues
+    forward();
+    delay(120);
+    stopMotors();
+    delay(40);
+ 
+    // Read again
+    int R2  = digitalRead(IR_RIGHT);
+    int MR2 = digitalRead(IR_MID_RIGHT);
+    int ML2 = digitalRead(IR_MID_LEFT);
+    int L2  = digitalRead(IR_LEFT);
+ 
+    if (L2 == 1 && ML2 == 1 && MR2 == 1 && R2 == 1) {
+      // REAL FINISH
+      stopMotors();
+      while(true){}
+    }
+ 
+    // Not a finish → resume navigation
+    forward();
+    delay(80);
+    return;
   }
  
-  // ---------- POSSIBLE DEAD-END (ALL WHITE) ----------
+ 
+  // ---------- DEAD-END (ALL WHITE) ----------
   if (L == 0 && ML == 0 && MR == 0 && R == 0) {
     allWhiteCounter++;
   } else {
@@ -109,11 +132,11 @@ void loop() {
   if (allWhiteCounter > 5) {
     allWhiteCounter = 0;
  
-    // ------------------ PEEK RIGHT CHECK ------------------
+    // --- PEEK RIGHT FOR HIDDEN PATH ---
     stopMotors();
     delay(30);
-    right();        // peek a little to check for a hidden right branch
-    delay(120);     // L298N small angle (tune 80–130 ms)
+    right();
+    delay(130);
     stopMotors();
     delay(30);
  
@@ -121,22 +144,21 @@ void loop() {
     int MR2 = digitalRead(IR_MID_RIGHT);
     int ML2 = digitalRead(IR_MID_LEFT);
  
-    // If right found -> commit full right turn
     if (R2 == 1 || MR2 == 1 || ML2 == 1) {
       right();
-      delay(250);   // Full 90° turn on L298N (tune 200–300 ms)
+      delay(250);
       stopMotors();
       return;
     }
  
-    // If no right turn, return to center position
+    // Return to center
     left();
     delay(100);
     stopMotors();
     delay(20);
  
-    // ------------------ FORWARD REVEAL TEST ------------------
-    forward();      // small forward to reveal corners / overshoot fix
+    // Reveal forward
+    forward();
     delay(70);
     stopMotors();
     delay(20);
@@ -147,37 +169,36 @@ void loop() {
     ML = digitalRead(IR_MID_LEFT);
     L  = digitalRead(IR_LEFT);
  
-    // If line appeared -> continue
     if (R || MR || ML || L) return;
  
-    // Real dead-end -> U-turn
     turnAround();
     return;
   }
  
-  // ---------- NORMAL LEFT-HAND RULE (YOUR ORIGINAL PRIORITY) ----------
  
-  // 1) Prefer LEFT TURN
+  // ================= LEFT-HAND RULE =================
+ 
+  // 1) Prefer LEFT turn
   if (L == 1 && (ML == 1 || MR == 1)) {
     left();
     delay(70);
     return;
   }
  
-  // 2) If straight available, take it
+  // 2) Go straight if possible
   if (M == 1) {
     forward();
     return;
   }
  
-  // 3) If no straight, take RIGHT
+  // 3) Else take RIGHT
   if (R == 1 && (ML == 1 || MR == 1)) {
     right();
     delay(70);
     return;
   }
  
-  // 4) Small corrections if drifting
+  // 4) Drift correction
   if (L == 1) left();
   else if (R == 1) right();
   else stopMotors();
