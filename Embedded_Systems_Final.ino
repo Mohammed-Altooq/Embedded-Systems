@@ -99,7 +99,7 @@ void loop() {
  
     // Move ahead a little to test if black continues
     forward();
-    delay(120);
+    delay(160);
     stopMotors();
     delay(40);
  
